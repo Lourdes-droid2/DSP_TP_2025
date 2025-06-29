@@ -1,0 +1,149 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+
+RESULTS_CSV_PATH = "full_experiment_results.csv"
+PLOTS_DIR = "analysis_plots"
+
+def plot_error_vs_param(df, error_col, param_col, title, filename, 
+                        param_bins=10, is_angular_error=False, 
+                        error_label='Error (s or deg)', param_label='Parameter'):
+    """Función genérica para graficar error vs. un parámetro."""
+    if error_col not in df.columns or param_col not in df.columns:
+        print(f"Advertencia: Columnas {error_col} o {param_col} no encontradas. Saltando gráfico: {title}")
+        return
+
+    # Usar error absoluto para el promedio
+    df_plot = df.dropna(subset=[error_col, param_col]).copy()
+    df_plot['error_abs'] = df_plot[error_col].abs()
+    
+    # Si el error es angular, manejar el wrapping (ej. error de 180 vs -180 es lo mismo)
+    # Esto es más complejo para el error promedio, pero para visualización podría ser útil
+    # Por ahora, el error absoluto simple.
+
+    plt.figure(figsize=(10, 6))
+    if pd.api.types.is_numeric_dtype(df_plot[param_col]) and df_plot[param_col].nunique() > param_bins * 2:
+        # Si el parámetro es numérico y tiene muchos valores, discretizar para boxplot o lineplot de media
+        try:
+            df_plot[param_col + '_binned'] = pd.cut(df_plot[param_col], bins=param_bins)
+            sns.boxplot(x=param_col + '_binned', y='error_abs', data=df_plot, showfliers=False)
+            plt.xticks(rotation=45, ha='right')
+        except Exception as e:
+            print(f"  No se pudo hacer boxplot para {param_col} (error: {e}), usando scatter.")
+            plt.scatter(df_plot[param_col], df_plot['error_abs'], alpha=0.3, s=10)
+    else:
+        # Si es categórico o tiene pocos valores numéricos, usar boxplot directamente o scatter
+        if df_plot[param_col].nunique() <= param_bins * 2 : # umbral para decidir si es 'casi' categórico
+             sns.boxplot(x=param_col, y='error_abs', data=df_plot, showfliers=False)
+             plt.xticks(rotation=45, ha='right')
+        else:
+            plt.scatter(df_plot[param_col], df_plot['error_abs'], alpha=0.3, s=10)
+
+    plt.title(title)
+    plt.xlabel(param_label if param_label else param_col)
+    plt.ylabel(error_label)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(PLOTS_DIR, filename))
+    plt.close()
+    print(f"Gráfico guardado: {filename}")
+
+def analyze_and_plot(df):
+    """Función principal para generar todos los análisis y plots."""
+    if df.empty:
+        print("El DataFrame de resultados está vacío. No se pueden generar análisis.")
+        return
+
+    os.makedirs(PLOTS_DIR, exist_ok=True)
+
+    # Filtrar por tipo de resultado (TDOA por par vs DOA de array)
+    df_tdoa_pairs = df[df['mic_pair'] != 'array_avg_adj_pairs'].copy()
+    df_doa_array = df[df['mic_pair'] == 'array_avg_adj_pairs'].copy()
+
+    # --- Análisis de TDOA --- 
+    # Para cada método TDOA, analizar error vs varios parámetros
+    tdoa_methods_present = df_tdoa_pairs['tdoa_method'].unique()
+    for method in tdoa_methods_present:
+        df_method = df_tdoa_pairs[df_tdoa_pairs['tdoa_method'] == method].copy()
+        error_col_tdoa = 'tdoa_error_s'
+
+        plot_error_vs_param(df_method, error_col_tdoa, 'snr_db', 
+                            f'Error TDOA ({method}) vs. SNR', f'tdoa_error_{method}_vs_snr.png',
+                            param_label='SNR (dB)', error_label='Error Absoluto TDOA (s)')
+        plot_error_vs_param(df_method, error_col_tdoa, 'rt60_target_s', 
+                            f'Error TDOA ({method}) vs. RT60', f'tdoa_error_{method}_vs_rt60.png',
+                            param_label='RT60 Target (s)', error_label='Error Absoluto TDOA (s)')
+        plot_error_vs_param(df_method, error_col_tdoa, 'actual_dist_src_to_array_center_m', 
+                            f'Error TDOA ({method}) vs. Distancia Fuente-Array', f'tdoa_error_{method}_vs_dist.png',
+                            param_label='Distancia Fuente-Array (m)', error_label='Error Absoluto TDOA (s)')
+        plot_error_vs_param(df_method, error_col_tdoa, 'actual_azimuth_src_to_array_center_deg', 
+                            f'Error TDOA ({method}) vs. Azimut Real Fuente', f'tdoa_error_{method}_vs_azimuth.png',
+                            param_label='Azimut Real Fuente (deg)', error_label='Error Absoluto TDOA (s)')
+        # Error TDOA vs. separación de micrófonos del par
+        plot_error_vs_param(df_method, error_col_tdoa, 'mic_pair_distance_m', 
+                            f'Error TDOA ({method}) vs. Separación de Micrófonos del Par', f'tdoa_error_{method}_vs_mic_sep.png',
+                            param_label='Separación de Micrófonos del Par (m)', error_label='Error Absoluto TDOA (s)')
+
+    # Comparación de tiempos de cómputo TDOA
+    if not df_tdoa_pairs.empty:
+        plt.figure(figsize=(10,6))
+        sns.boxplot(x='tdoa_method', y='tdoa_computation_time_s', data=df_tdoa_pairs, showfliers=False)
+        plt.title('Tiempo de Cómputo por Método TDOA')
+        plt.ylabel('Tiempo (s)')
+        plt.xlabel('Método TDOA')
+        plt.grid(True, alpha=0.3)
+        plt.savefig(os.path.join(PLOTS_DIR, 'tdoa_computation_times.png'))
+        plt.close()
+        print("Gráfico guardado: tdoa_computation_times.png")
+
+    # --- Análisis de DOA (Array) --- 
+    # Para cada método TDOA base que produjo un DOA de array
+    doa_base_methods = df_doa_array['tdoa_method_for_avg_doa'].unique()
+    for base_method in doa_base_methods:
+        df_method_doa = df_doa_array[df_doa_array['tdoa_method_for_avg_doa'] == base_method].copy()
+        error_col_doa = 'doa_array_error_deg'
+
+        plot_error_vs_param(df_method_doa, error_col_doa, 'snr_db', 
+                            f'Error DOA Array (base {base_method}) vs. SNR', f'doa_array_error_{base_method}_vs_snr.png',
+                            param_label='SNR (dB)', error_label='Error Absoluto DOA (deg)', is_angular_error=True)
+        plot_error_vs_param(df_method_doa, error_col_doa, 'rt60_target_s', 
+                            f'Error DOA Array (base {base_method}) vs. RT60', f'doa_array_error_{base_method}_vs_rt60.png',
+                            param_label='RT60 Target (s)', error_label='Error Absoluto DOA (deg)', is_angular_error=True)
+        plot_error_vs_param(df_method_doa, error_col_doa, 'actual_dist_src_to_array_center_m', 
+                            f'Error DOA Array (base {base_method}) vs. Distancia Fuente-Array', f'doa_array_error_{base_method}_vs_dist.png',
+                            param_label='Distancia Fuente-Array (m)', error_label='Error Absoluto DOA (deg)', is_angular_error=True)
+        plot_error_vs_param(df_method_doa, error_col_doa, 'actual_azimuth_src_to_array_center_deg', 
+                            f'Error DOA Array (base {base_method}) vs. Azimut Real Fuente', f'doa_array_error_{base_method}_vs_azimuth.png',
+                            param_label='Azimut Real Fuente (deg)', error_label='Error Absoluto DOA (deg)', is_angular_error=True)
+
+    # --- Otros Análisis --- 
+    # Anecoica vs Reverberante (ej. para GCC-PHAT TDOA y DOA)
+    if 'tdoa_phat_error_s' in df_tdoa_pairs.columns and 'is_anechoic' in df_tdoa_pairs.columns:
+        plt.figure(figsize=(8,6))
+        sns.boxplot(x='is_anechoic', y=df_tdoa_pairs[df_tdoa_pairs['tdoa_method'] == 'phat']['tdoa_error_s'].abs(), data=df_tdoa_pairs[df_tdoa_pairs['tdoa_method'] == 'phat'], showfliers=False)
+        plt.title('Error TDOA (PHAT) en Salas Anecoicas vs. Reverberantes')
+        plt.xlabel('Es Anecoica')
+        plt.ylabel('Error Absoluto TDOA (s)')
+        plt.xticks([False, True], ['Reverberante', 'Anecoica'])
+        plt.grid(True, alpha=0.3)
+        plt.savefig(os.path.join(PLOTS_DIR, 'tdoa_phat_error_anechoic_vs_reverb.png'))
+        plt.close()
+        print("Gráfico guardado: tdoa_phat_error_anechoic_vs_reverb.png")
+
+    # Efecto de cantidad de micrófonos (requiere que main.py genere estos datos o se puedan inferir)
+    # Si en 'mic_pair' tenemos info como 'array_2mics_avg', 'array_3mics_avg', etc.
+    # O si se corre simulation.py con diferente NUM_MICS y se combinan los CSVs.
+    # Por ahora, este análisis es más complejo de implementar con la estructura actual del CSV.
+
+    print("--- analyze_results.py: Análisis completado ---")
+
+if __name__ == "__main__":
+    print("--- Iniciando script de análisis de resultados ---")
+    if not os.path.exists(RESULTS_CSV_PATH):
+        print(f"Error: Archivo de resultados no encontrado: {RESULTS_CSV_PATH}. Ejecute main.py primero.")
+    else:
+        main_results_df = pd.read_csv(RESULTS_CSV_PATH)
+        print(f"Resultados cargados: {len(main_results_df)} filas.")
+        analyze_and_plot(main_results_df)
