@@ -108,7 +108,7 @@ def estimate_tdoa_gcc(sig1: np.ndarray, sig2: np.ndarray, fs: float, method: str
         raise ValueError("Método GCC no reconocido. Use 'phat', 'scot', 'ml', 'classic' o 'roth'.")
 
     try:
-        cc = fftshift(ifft(R_weighted).real)
+        cc = np.real(ifft(R_weighted))
     except Exception:
         return return_nan_with_time(start_time)
 
@@ -116,6 +116,7 @@ def estimate_tdoa_gcc(sig1: np.ndarray, sig2: np.ndarray, fs: float, method: str
         return return_nan_with_time(start_time)
 
     lags_vector = correlation_lags(len_sig1, len_sig2, mode='full') / fs
+    # El máximo de cc corresponde al lag de lags_vector
     tdoa_index = np.argmax(cc)
     tdoa = lags_vector[tdoa_index]
     return tdoa, time.perf_counter() - start_time

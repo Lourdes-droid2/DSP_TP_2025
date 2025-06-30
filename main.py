@@ -3,6 +3,7 @@ import numpy as np
 import soundfile as sf
 import pandas as pd
 import time
+from scipy.signal import fftconvolve
 
 from load_signal import load_signal_from_wav
 from tdoa import estimate_tdoa_cc, estimate_tdoa_gcc
@@ -87,7 +88,7 @@ def process_simulation_data():
         if not valid or len(mic_rirs) != num_mics:
             continue
 
-        reverberant_signals = [np.convolve(anechoic_signal, rir, mode='full') for rir in mic_rirs]
+        reverberant_signals = [fftconvolve(anechoic_signal, rir, mode='full') for rir in mic_rirs]
         source_pos = [sim_params['source_pos_x'], sim_params['source_pos_y'], sim_params['source_pos_z']]
         real_doa_deg = sim_params.get('actual_azimuth_src_to_array_center_deg', np.nan)
         mic_sep = sim_params['mic_separation_m']
@@ -101,17 +102,12 @@ def process_simulation_data():
                     real_tdoa = calculate_real_tdoa(source_pos, mic_positions[i], mic_positions[j])
                     mic_pairs.append({'mic1': i, 'mic2': j, 'd': d_pair, 'real_tdoa': real_tdoa})
 
+            # Inicializar el diccionario para guardar resultados por método
+            pair_results_by_method = {}
+
             for pair in mic_pairs:
                 idx1, idx2, d_pair, real_tdoa = pair['mic1'], pair['mic2'], pair['d'], pair['real_tdoa']
                 sig_a, sig_b = noisy_signals[idx1], noisy_signals[idx2]
-                result_base = sim_params.to_dict()
-                result_base.update({
-                    'snr_db': snr_db,
-                    'mic_pair': f"{idx1}-{idx2}",
-                    'mic_pair_distance_m': d_pair,
-                    'tdoa_real_s': real_tdoa,
-                    'doa_real_deg': real_doa_deg
-                })
                 for method in tdoa_methods:
                     try:
                         if method == 'cc':
@@ -120,35 +116,73 @@ def process_simulation_data():
                             tdoa_val, comp_time = estimate_tdoa_gcc(sig_a, sig_b, fs_sim, method=method)
                         tdoa_error = tdoa_val - real_tdoa if not np.isnan(tdoa_val) else np.nan
                         doa_est = estimate_doa_from_tdoa(tdoa_val, d_pair)
-
                     except Exception as e:
                         print(f"  Error en método {method} para par {idx1}-{idx2}: {e}")
                         tdoa_val, comp_time, tdoa_error, doa_est = np.nan, np.nan, np.nan, np.nan
-                    result = result_base.copy()
-                    result.update({
-                        'tdoa_method': method,
-                        'tdoa_estimated_s': tdoa_val,
-                        'tdoa_error_s': tdoa_error,
-                        'tdoa_computation_time_s': comp_time,
-                        'doa_estimated_from_pair_deg': doa_est
+                    # Guardar resultados en lista temporal por método
+                    if method not in pair_results_by_method:
+                        pair_results_by_method[method] = []
+                    pair_results_by_method[method].append({
+                        'doa_estimated_from_pair_deg': doa_est,
+                        'mic_pair': f"{idx1}-{idx2}",
+                        'tdoa_val': tdoa_val,
+                        'd_pair': d_pair,
+                        'real_tdoa': real_tdoa,
+                        'doa_real_deg': real_doa_deg,
                     })
-                    all_experiment_results.append(result)
+
+            # --- DEBUG: Mostrar qué pares adyacentes hay para cada método ---
+            for method in tdoa_methods:
+                adj_pairs = [r for r in pair_results_by_method.get(method, []) if abs(int(r['mic_pair'].split('-')[0]) - int(r['mic_pair'].split('-')[1])) == 1]
+                print(f"\nMétodo: {method} | Pares adyacentes encontrados: {len(adj_pairs)}")
+                for r in adj_pairs:
+                    print(f"  Par: {r['mic_pair']} | DOA: {r['doa_estimated_from_pair_deg']} | TDOA: {r['tdoa_val']} | d: {r['d_pair']} | real_tdoa: {r['real_tdoa']}")
+
+                if not adj_pairs:
+                    print(f"  [WARN] No hay pares adyacentes para método {method} en config {sim_params['config_id']} SNR {snr_db}")
+                    continue
+
+                # --- DEBUG: Mostrar los DOA antes de promediar ---
+                doa_vals = [r['doa_estimated_from_pair_deg'] for r in adj_pairs]
+                print(f"  DOAs a promediar para método {method}: {doa_vals}")
+
+                # Si todos los valores son nan, el promedio será nan
+                if all(np.isnan(doa_vals)):
+                    print(f"  [WARN] Todos los DOA son NaN para método {method} en config {sim_params['config_id']} SNR {snr_db}")
+                    doa_array_est = np.nan
+                else:
+                    doa_array_est = np.nanmean(doa_vals)
+                doa_array_real = real_doa_deg
+                doa_array_error = doa_array_est - doa_array_real if not np.isnan(doa_array_est) and not np.isnan(doa_array_real) else np.nan
+
+                print(f"  DOA promedio array para método {method}: {doa_array_est} (real: {doa_array_real}, error: {doa_array_error})")
+
+                result = sim_params.to_dict()
+                result.update({
+                    'snr_db': snr_db,
+                    'mic_pair': 'array_avg_adj_pairs',
+                    'tdoa_method_for_avg_doa': method,
+                    'doa_array_estimated_deg': doa_array_est,
+                    'doa_array_real_deg': doa_array_real,
+                    'doa_array_error_deg': doa_array_error
+                })
+                all_experiment_results.append(result)
+
+            for method in tdoa_methods:
+                for pair_result in pair_results_by_method.get(method, []):
+                    pair_result_full = sim_params.to_dict()
+                    pair_result_full.update(pair_result)
+                    pair_result_full['snr_db'] = snr_db
+                    pair_result_full['tdoa_method'] = method
+                    all_experiment_results.append(pair_result_full)
 
     if all_experiment_results:
         results_df = pd.DataFrame(all_experiment_results)
-        # --- RESUMEN POR POSICIÓN Y MÉTODO ---
-        pair_rows = results_df[results_df['mic_pair'].str.contains('-') & results_df['tdoa_method'].notna()]
-        summary = pair_rows.groupby([
-            'azimuth_deg', 'elevation_deg', 'snr_db', 'tdoa_method'
-        ]).agg(
-            doa_estimated_mean=('doa_estimated_from_pair_deg', 'mean'),
-            doa_estimated_std=('doa_estimated_from_pair_deg', 'std'),
-            doa_real_deg=('doa_real_deg', 'first'),
-        ).reset_index()
-        summary['doa_error_mean'] = summary['doa_estimated_mean'] - summary['doa_real_deg']
-        summary_csv_path = "doa_summary_by_position.csv"
-        summary.to_csv(summary_csv_path, index=False)
-        print(f"Resumen por posición guardado en: {summary_csv_path}")
+        # Solo filas de promedio de array
+        avg_results = results_df[results_df['mic_pair'] == 'array_avg_adj_pairs']
+        # Guardar todos los campos relevantes
+        avg_results.to_csv("doa_array_avg_results.csv", index=False)
+        print("Resultados promediados por array guardados en: doa_array_avg_results.csv")
     else:
         print("No se generaron resultados.")
     print("--- main.py: Procesamiento finalizado ---")

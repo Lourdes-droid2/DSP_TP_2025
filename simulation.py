@@ -98,9 +98,9 @@ if __name__ == "__main__":
     array_center = [2.5, 2.5, 2.5]
     mic_counts = [4]
     mic_separation = 0.10
-    rt60_values = [0.05, 0.7, 3.0]
+    rt60_values = [0.01, 0.05, 0.3, 0.7]
     angles = range(0, 181, 45)  # <-- Angulos de 0 a 180 grados en pasos de 10
-    elevations = [0, 15, 30]  # Ángulos de elevación en grados
+    elevations = [0]  # Ángulos de elevación en grados
 
     for rt60 in rt60_values:
         for n_mics in mic_counts:
